@@ -41,8 +41,8 @@ round_start:
     addi x3, x0, 15
     sw   x3, 4(x2)
     lw   x5, 12(x2)            # Inicio de la espera de tres segundos
-    lui  x6, 0x4787
-    addi x6, x6, -1856         # x6 = 75.000.000 ciclos
+    lui  x6, 0x17D7
+    addi x6, x6, 840         # x6 = 75.000.000 ciclos
 
 wait_three_seconds:
     lw   x9, 12(x2)
