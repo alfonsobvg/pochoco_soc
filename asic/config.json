@@ -13,7 +13,8 @@
     "dir::../rtl/espino_core/espino_id_stage.v",
     "dir::../rtl/espino_core/espino_if_stage.v",
     "dir::../rtl/espino_core/espino_load_store_unit.v",
-    "dir::../rtl/espino_core/espino_register_file.v"   
+    "dir::../rtl/espino_core/espino_register_file.v",
+    "dir::../rtl/game_rom.v"
   ],
   "CLOCK_PORT": "clk",
   "CLOCK_PERIOD": 100,

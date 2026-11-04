@@ -9,10 +9,11 @@
 // - Nicolás Villegas <navillegas@miuandes.cl>
 
 module pochoco_soc #(
-  parameter NumWords   = 512,
-  parameter MemFile    = ""
+  parameter NumWords = 64,
+  parameter MemFile = ""
 ) (
-  input  wire        i_Clk,
+  input wire i_Clk,
+  input wire i_Rst_n,
 
   output wire [3:0] o_LED,
   input  wire [3:0] i_Switch,
@@ -32,12 +33,8 @@ module pochoco_soc #(
   assign clk = i_Clk;
 
   // Power-on reset
-  reg  [3:0] por_cnt = 4'b0;
-  wire       rst_ni;
-  always @(posedge clk) begin
-    if (por_cnt != 4'hF) por_cnt <= por_cnt + 4'd1;
-  end
-  assign rst_ni = (por_cnt == 4'hF);
+  wire rst_ni;
+  assign rst_ni = i_Rst_n;
 
   // Core-memory wiring
   wire        instr_req;
