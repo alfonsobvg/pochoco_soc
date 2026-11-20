@@ -1,201 +1,198 @@
 #!/usr/bin/env python3
-"""Referencia Python para la estrategia de promedio móvil de 4 ticks.
+# Referencia en Python para el Pochoco Trader.
+#
+# Uso:
+#   python reference.py          -> corre con umbral 8
+#   python reference.py 5        -> corre con umbral 5
+#   python reference.py barrido  -> compara umbrales de 0 a 20
 
-El programa calcula una decisión después de recibir cada precio. Esa decisión
-se transmite en el siguiente tick, por lo que la contabilidad ejecuta primero
-la decisión pendiente al precio actual y luego calcula la próxima decisión.
-"""
-
-from __future__ import annotations
-
-import argparse
 import csv
-from collections import deque
+import sys
 from pathlib import Path
 
 
-INITIAL_CASH = 10_000
-COMMISSION = 5
-MAX_QUANTITY = 63
-WINDOW = 4
+CAJA_INICIAL = 10000
+COMISION = 5
+MAX_ACCIONES = 63
+VENTANA = 4
+UMBRAL = 8
 
-HOLD = 0b00
-BUY = 0b01
-SELL = 0b10
-BUY_MAX = (BUY << 6) | MAX_QUANTITY
-SELL_MAX = (SELL << 6) | MAX_QUANTITY
-
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_PRICES = PROJECT_DIR / "practica_meta.csv"
-DEFAULT_OUTPUT = PROJECT_DIR / "sw" / "reference_decisions.csv"
+ARCHIVO_PROYECTO = Path(__file__).resolve().parent.parent
+ARCHIVO_SERIE = ARCHIVO_PROYECTO / "practica_meta.csv"
+ARCHIVO_SALIDA = Path(__file__).resolve().parent / "reference_decisions.csv"
 
 
-def load_prices(path: Path) -> list[tuple[int, int]]:
-    """Lee una serie CSV con encabezado tick,price y precios de 1 a 255."""
-    rows: list[tuple[int, int]] = []
-    previous_tick: int | None = None
+def leer_precios(archivo_csv):
+    """Lee las columnas tick y price del archivo de práctica."""
+    precios = []
 
-    with path.open("r", newline="", encoding="utf-8-sig") as stream:
-        reader = csv.DictReader(stream)
-        if reader.fieldnames is None or not {"tick", "price"}.issubset(reader.fieldnames):
-            raise ValueError("El CSV debe tener las columnas tick,price.")
-
-        for line_number, row in enumerate(reader, start=2):
-            if not row or row.get("tick") is None:
+    with open(archivo_csv, newline="", encoding="utf-8-sig") as archivo:
+        lector = csv.DictReader(archivo)
+        for fila in lector:
+            if not fila or not fila.get("tick"):
                 continue
-            try:
-                tick = int(row["tick"])
-                price = int(row["price"])
-            except (TypeError, ValueError) as error:
-                raise ValueError(f"Fila {line_number}: tick y price deben ser enteros.") from error
 
-            if not 1 <= price <= 255:
-                raise ValueError(f"Fila {line_number}: el precio debe estar entre 1 y 255.")
-            if previous_tick is not None and tick != previous_tick + 1:
-                raise ValueError(f"Fila {line_number}: se esperaba tick {previous_tick + 1}, llegó {tick}.")
+            tick = int(fila["tick"])
+            precio = int(fila["price"])
 
-            rows.append((tick, price))
-            previous_tick = tick
+            if precio < 1 or precio > 255:
+                raise ValueError("El precio debe estar entre 1 y 255.")
+            if precios and tick != precios[-1][0] + 1:
+                raise ValueError("Los ticks del archivo deben ir en orden y sin saltos.")
 
-    if not rows:
-        raise ValueError("El CSV no contiene precios.")
-    return rows
+            precios.append((tick, precio))
+
+    if len(precios) == 0:
+        raise ValueError("El archivo no tiene precios.")
+
+    return precios
 
 
-def apply_order(decision: int, price: int, cash: int, shares: int) -> tuple[int, int, int]:
-    """Aplica una decisión con las reglas de caja, acciones y comisión del curso."""
-    action = decision >> 6
-    requested = decision & 0x3F
-    executed = 0
+def ejecutar_orden(decision, precio, caja, acciones):
+    """Aplica al precio actual la decisión que llegó del tick anterior."""
+    accion = decision >> 6
+    cantidad = decision & 63
+    cantidad_ejecutada = 0
 
-    if action == BUY:
-        affordable = max(0, (cash - COMMISSION) // price)
-        executed = min(requested, affordable)
-        if executed > 0:
-            cash -= executed * price + COMMISSION
-            shares += executed
-    elif action == SELL:
-        executed = min(requested, shares)
-        if executed > 0 and cash + executed * price >= COMMISSION:
-            cash += executed * price - COMMISSION
-            shares -= executed
-        else:
-            executed = 0
+    if accion == 1:  # Comprar
+        alcanza = (caja - COMISION) // precio
+        if alcanza < 0:
+            alcanza = 0
+        if cantidad > alcanza:
+            cantidad = alcanza
 
-    return cash, shares, executed
+        if cantidad > 0:
+            caja = caja - cantidad * precio - COMISION
+            acciones = acciones + cantidad
+            cantidad_ejecutada = cantidad
 
+    elif accion == 2:  # Vender
+        if cantidad > acciones:
+            cantidad = acciones
 
-def decide(
-    price: int,
-    previous_prices: deque[int],
-    shares: int,
-    threshold: int,
-) -> int:
-    """Compara el precio actual con el promedio de los cuatro precios previos."""
-    if len(previous_prices) < WINDOW:
-        return HOLD
+        if cantidad > 0 and caja + cantidad * precio >= COMISION:
+            caja = caja + cantidad * precio - COMISION
+            acciones = acciones - cantidad
+            cantidad_ejecutada = cantidad
 
-    # 4 * price versus the sum avoids division and floating-point rounding.
-    previous_sum = sum(previous_prices)
-    scaled_threshold = threshold * WINDOW
-    if price * WINDOW > previous_sum + scaled_threshold and shares == 0:
-        return BUY_MAX
-    if price * WINDOW < previous_sum - scaled_threshold and shares > 0:
-        return SELL_MAX
-    return HOLD
+    return caja, acciones, cantidad_ejecutada
 
 
-def simulate(
-    prices: list[tuple[int, int]], threshold: int = 0
-) -> tuple[list[dict[str, int | str]], dict[str, int]]:
-    """Simula el retraso SPI y mantiene una copia local de la cartera oficial."""
-    cash = INITIAL_CASH
-    shares = 0
-    pending_decision = 0
-    history: deque[int] = deque(maxlen=WINDOW)
+def decidir(precio, precios_anteriores, acciones, umbral):
+    """Compara el precio actual con la media de los cuatro precios previos."""
+    if len(precios_anteriores) < VENTANA:
+        return 0  # Mantener durante el período inicial
 
-    orders = 0
-    commissions = 0
-    peak = INITIAL_CASH
-    max_drawdown = 0
-    details: list[dict[str, int | str]] = []
+    suma = sum(precios_anteriores)
 
-    for tick, price in prices:
-        executed_decision = pending_decision
-        cash, shares, quantity_executed = apply_order(
-            executed_decision, price, cash, shares
+    # Multiplicar por 4 evita usar división para calcular el promedio.
+    if precio * VENTANA > suma + umbral * VENTANA and acciones == 0:
+        return (1 << 6) | MAX_ACCIONES  # Comprar hasta 63
+
+    if precio * VENTANA < suma - umbral * VENTANA and acciones > 0:
+        return (2 << 6) | MAX_ACCIONES  # Vender hasta 63
+
+    return 0
+
+
+def simular(precios, umbral):
+    """Simula la estrategia y lleva una copia local de caja y acciones."""
+    caja = CAJA_INICIAL
+    acciones = 0
+    decision_pendiente = 0
+    precios_anteriores = []
+
+    ordenes = 0
+    comisiones = 0
+    patrimonio_maximo = CAJA_INICIAL
+    perdida_maxima = 0
+    filas = []
+
+    for tick, precio in precios:
+        decision_ejecutada = decision_pendiente
+        caja, acciones, cantidad = ejecutar_orden(
+            decision_ejecutada, precio, caja, acciones
         )
-        if quantity_executed > 0:
-            orders += 1
-            commissions += COMMISSION
 
-        wealth = cash + shares * price
-        peak = max(peak, wealth)
-        drawdown = peak - wealth
-        max_drawdown = max(max_drawdown, drawdown)
+        if cantidad > 0:
+            ordenes += 1
+            comisiones += COMISION
 
-        next_decision = decide(price, history, shares, threshold)
-        details.append(
+        patrimonio = caja + acciones * precio
+        if patrimonio > patrimonio_maximo:
+            patrimonio_maximo = patrimonio
+        perdida = patrimonio_maximo - patrimonio
+        if perdida > perdida_maxima:
+            perdida_maxima = perdida
+
+        decision_nueva = decidir(precio, precios_anteriores, acciones, umbral)
+        filas.append(
             {
                 "tick": tick,
-                "price": price,
-                "threshold": threshold,
-                "decision_executed": f"{executed_decision:02X}",
-                "quantity_executed": quantity_executed,
-                "decision_written": f"{next_decision:02X}",
-                "cash": cash,
-                "shares": shares,
-                "wealth": wealth,
-                "peak": peak,
-                "drawdown": drawdown,
+                "price": precio,
+                "threshold": umbral,
+                "decision_executed": f"{decision_ejecutada:02X}",
+                "quantity_executed": cantidad,
+                "decision_written": f"{decision_nueva:02X}",
+                "cash": caja,
+                "shares": acciones,
+                "wealth": patrimonio,
+                "peak": patrimonio_maximo,
+                "drawdown": perdida,
             }
         )
 
-        history.append(price)
-        pending_decision = next_decision
+        precios_anteriores.append(precio)
+        if len(precios_anteriores) > VENTANA:
+            precios_anteriores.pop(0)
+        decision_pendiente = decision_nueva
 
-    summary = {
-        "final_wealth": cash + shares * prices[-1][1],
-        "orders": orders,
-        "commissions": commissions,
-        "max_drawdown": max_drawdown,
+    resultado = {
+        "patrimonio": caja + acciones * precios[-1][1],
+        "ordenes": ordenes,
+        "comisiones": comisiones,
+        "perdida_maxima": perdida_maxima,
     }
-    return details, summary
+    return filas, resultado
 
 
-def buy_and_hold(prices: list[tuple[int, int]]) -> dict[str, int]:
-    """Calcula la referencia que compra al primer precio y conserva las acciones."""
-    cash = INITIAL_CASH
-    shares = 0
-    orders = 0
-    commissions = 0
-    peak = INITIAL_CASH
-    max_drawdown = 0
+def comprar_y_mantener(precios):
+    """Compra al primer precio y conserva las acciones hasta el final."""
+    caja = CAJA_INICIAL
+    acciones = 0
+    ordenes = 0
+    comisiones = 0
+    patrimonio_maximo = CAJA_INICIAL
+    perdida_maxima = 0
 
-    for index, (_, price) in enumerate(prices):
-        if index == 0:
-            quantity = max(0, (cash - COMMISSION) // price)
-            if quantity > 0:
-                cash -= quantity * price + COMMISSION
-                shares += quantity
-                orders += 1
-                commissions += COMMISSION
+    for numero, par in enumerate(precios):
+        precio = par[1]
 
-        wealth = cash + shares * price
-        peak = max(peak, wealth)
-        max_drawdown = max(max_drawdown, peak - wealth)
+        if numero == 0:
+            cantidad = (caja - COMISION) // precio
+            caja = caja - cantidad * precio - COMISION
+            acciones = cantidad
+            ordenes = 1
+            comisiones = COMISION
+
+        patrimonio = caja + acciones * precio
+        if patrimonio > patrimonio_maximo:
+            patrimonio_maximo = patrimonio
+        perdida = patrimonio_maximo - patrimonio
+        if perdida > perdida_maxima:
+            perdida_maxima = perdida
 
     return {
-        "final_wealth": cash + shares * prices[-1][1],
-        "orders": orders,
-        "commissions": commissions,
-        "max_drawdown": max_drawdown,
+        "patrimonio": caja + acciones * precios[-1][1],
+        "ordenes": ordenes,
+        "comisiones": comisiones,
+        "perdida_maxima": perdida_maxima,
     }
 
 
-def write_decisions(path: Path, rows: list[dict[str, int | str]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fields = [
+def guardar_csv(filas):
+    """Guarda las decisiones ejecutadas/escritas y la cartera tick a tick."""
+    columnas = [
         "tick",
         "price",
         "threshold",
@@ -208,71 +205,59 @@ def write_decisions(path: Path, rows: list[dict[str, int | str]]) -> None:
         "peak",
         "drawdown",
     ]
-    with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+
+    with open(ARCHIVO_SALIDA, "w", newline="", encoding="utf-8") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=columnas)
+        escritor.writeheader()
+        escritor.writerows(filas)
 
 
-def print_summary(name: str, result: dict[str, int]) -> None:
+def mostrar_resultado(nombre, resultado):
     print(
-        f"{name:22} patrimonio={result['final_wealth']:>8}  "
-        f"órdenes={result['orders']:>5}  comisiones={result['commissions']:>6}  "
-        f"pérdida máxima={result['max_drawdown']:>6}"
+        f"{nombre:22} patrimonio={resultado['patrimonio']:>8}  "
+        f"órdenes={resultado['ordenes']:>5}  "
+        f"comisiones={resultado['comisiones']:>6}  "
+        f"pérdida máxima={resultado['perdida_maxima']:>6}"
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prices", type=Path, default=DEFAULT_PRICES, help="CSV tick,price")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="CSV de decisiones y cartera")
-    parser.add_argument(
-        "--threshold",
-        type=int,
-        default=8,
-        help="margen entero sobre/bajo el promedio móvil (por defecto: 0)",
-    )
-    parser.add_argument(
-        "--sweep-max",
-        type=int,
-        help="compara umbrales desde 0 hasta este valor y no escribe el CSV de detalle",
-    )
-    args = parser.parse_args()
+def main():
+    archivo_csv = ARCHIVO_SERIE
+    modo = sys.argv[1] if len(sys.argv) > 1 else ""
 
-    if args.threshold < 0 or (args.sweep_max is not None and args.sweep_max < 0):
-        parser.error("los umbrales no pueden ser negativos")
+    if modo == "barrido":
+        if len(sys.argv) > 2:
+            archivo_csv = Path(sys.argv[2])
+    else:
+        umbral = UMBRAL
+        if modo:
+            umbral = int(modo)
+        if len(sys.argv) > 2:
+            archivo_csv = Path(sys.argv[2])
 
-    prices = load_prices(args.prices)
-    hold = buy_and_hold(prices)
+    precios = leer_precios(archivo_csv)
+    comprar_mantener = comprar_y_mantener(precios)
 
-    if args.sweep_max is not None:
-        print(f"Serie: {args.prices} ({len(prices)} ticks)")
-        print_summary("No operar", {
-            "final_wealth": INITIAL_CASH,
-            "orders": 0,
-            "commissions": 0,
-            "max_drawdown": 0,
-        })
-        print_summary("Comprar y mantener", hold)
-        for threshold in range(args.sweep_max + 1):
-            _, result = simulate(prices, threshold)
-            print_summary(f"MA4 umbral {threshold}", result)
+    print(f"Serie: {archivo_csv} ({len(precios)} ticks)")
+    mostrar_resultado("No operar", {
+        "patrimonio": CAJA_INICIAL,
+        "ordenes": 0,
+        "comisiones": 0,
+        "perdida_maxima": 0,
+    })
+    mostrar_resultado("Comprar y mantener", comprar_mantener)
+
+    if modo == "barrido":
+        for valor in range(21):
+            _, resultado = simular(precios, valor)
+            mostrar_resultado(f"MA4 umbral {valor}", resultado)
         return
 
-    details, strategy = simulate(prices, args.threshold)
-    write_decisions(args.output, details)
-
-    print(f"Serie: {args.prices} ({len(prices)} ticks)")
-    print(f"Umbral: {args.threshold}")
-    print(f"Resultados guardados en: {args.output}")
-    print_summary("No operar", {
-        "final_wealth": INITIAL_CASH,
-        "orders": 0,
-        "commissions": 0,
-        "max_drawdown": 0,
-    })
-    print_summary("Comprar y mantener", hold)
-    print_summary("Promedio móvil 4", strategy)
+    filas, resultado = simular(precios, umbral)
+    guardar_csv(filas)
+    print(f"Umbral usado: {umbral}")
+    print(f"Decisiones guardadas en: {ARCHIVO_SALIDA}")
+    mostrar_resultado("Promedio móvil 4", resultado)
 
 
 if __name__ == "__main__":
