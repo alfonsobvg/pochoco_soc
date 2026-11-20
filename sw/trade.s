@@ -1,19 +1,19 @@
 # Agente Pochoco Trader para Espino RV32E.
 #
-# Regla: compara el precio actual con el promedio de los cuatro precios
-# anteriores. H = 8 unidades de precio. Compra 63 si está fuera del mercado y
-# el precio supera el promedio por más de H; vende 63 si tiene acciones y el
-# precio cae bajo el promedio por más de H. La FPGA limita cada orden a la caja
-# o a las acciones disponibles.
+# Regla: compara el precio actual con el promedio de los cinco precios
+# anteriores. H_compra = 7 y H_venta = 15 unidades de precio. Compra 63 si está
+# fuera del mercado y el precio supera el promedio por más de H_compra; vende
+# 63 si tiene acciones y cae bajo el promedio por más de H_venta. La FPGA limita
+# cada orden a la caja o a las acciones disponibles.
 #
 # DECISION se transmite en el tick siguiente. Por eso, al recibir un precio,
 # primero se aplica al registro local la decisión pendiente al precio actual,
 # y luego se calcula y escribe la nueva decisión.
 #
 # Copia local de la cartera y estado en RAM (NumWords=512):
-#   0x7D8 caja, 0x7DC acciones, 0x7E0-0x7EC ventana de 4 precios,
-#   0x7F0 cantidad de precios válidos, 0x7F4 índice circular,
-#   0x7F8 decisión pendiente.
+#   0x7D8 caja, 0x7DC acciones, 0x7E0-0x7F0 ventana de 5 precios,
+#   0x7F4 cantidad de precios válidos, 0x7F8 índice circular,
+#   0x7FC decisión pendiente.
 
 .section .text
 .global _start
@@ -26,9 +26,9 @@ _start:
     addi x3, x3, 1808         # Caja inicial = 10.000
     sw   x3, 0(x14)
     sw   x0, 4(x14)           # Acciones iniciales = 0
-    sw   x0, 24(x14)          # Precios válidos = 0
-    sw   x0, 28(x14)          # Índice de ventana = 0
-    sw   x0, 32(x14)          # Decisión pendiente = mantener
+    sw   x0, 28(x14)          # Precios válidos = 0
+    sw   x0, 32(x14)          # Índice de ventana = 0
+    sw   x0, 36(x14)          # Decisión pendiente = mantener
 
 wait_price:
     lw   x5, 0(x2)            # STATUS: bit 0 = precio nuevo
@@ -39,7 +39,7 @@ wait_price:
 # Aplicar la decisión transmitida en el tick anterior al precio actual.
     lw   x3, 0(x14)           # Caja local
     lw   x4, 4(x14)           # Acciones locales
-    lw   x5, 32(x14)          # Decisión pendiente
+    lw   x5, 36(x14)          # Decisión pendiente
     addi x6, x0, 127          # 0x7F = comprar hasta 63
     beq  x5, x6, apply_buy
     addi x6, x0, 191          # 0xBF = vender hasta 63
@@ -98,9 +98,9 @@ sell_value_done:
 
 after_order:
 # Decidir con la ventana anterior a incorporar el precio actual.
-    lw   x7, 24(x14)          # Cantidad de precios válidos
-    addi x11, x0, 4
-    bltu x7, x11, choose_hold # Esperar a tener cuatro precios
+    lw   x7, 28(x14)          # Cantidad de precios válidos
+    addi x11, x0, 5
+    bltu x7, x11, choose_hold # Esperar a tener cinco precios
 
     lw   x9, 8(x14)
     lw   x10, 12(x14)
@@ -108,15 +108,18 @@ after_order:
     lw   x10, 16(x14)
     add  x9, x9, x10
     lw   x10, 20(x14)
-    add  x9, x9, x10         # Suma de los cuatro precios anteriores
+    add  x9, x9, x10
+    lw   x10, 24(x14)
+    add  x9, x9, x10         # Suma de los cinco precios anteriores
 
     add  x10, x8, x8
-    add  x10, x10, x10       # Cuatro veces el precio actual
-    addi x11, x9, 32         # Suma + 4*H, con H=8
+    add  x10, x10, x10       # Multiplicar por cuatro
+    add  x10, x10, x8        # Cinco veces el precio actual
+    addi x11, x9, 35         # Suma + 5*H_compra
     bltu x11, x10, signal_high
 
-    addi x11, x0, 32
-    bltu x9, x11, choose_hold # Evitar underflow en suma - 4*H
+    addi x11, x0, 75         # Cinco veces el umbral de venta (5*15)
+    bltu x9, x11, choose_hold # Evitar underflow en suma - 5*H_venta
     sub  x11, x9, x11
     bltu x10, x11, signal_low
     jal  x0, choose_hold
@@ -137,24 +140,28 @@ choose_hold:
     addi x13, x0, 0           # Mantener
 
 decision_ready:
-# Guardar el precio actual en la ranura circular idx y avanzar idx = (idx+1)%4.
-    lw   x7, 28(x14)
+# Guardar el precio actual en la ranura circular idx y avanzar idx = (idx+1)%5.
+    lw   x7, 32(x14)
     add  x9, x7, x7
     add  x9, x9, x9           # idx * 4
     add  x9, x9, x14
     addi x9, x9, 8            # Dirección de la ventana + idx * 4
     sw   x8, 0(x9)
     addi x7, x7, 1
-    andi x7, x7, 3
-    sw   x7, 28(x14)
+    addi x11, x0, 5
+    bltu x7, x11, index_ready
+    addi x7, x0, 0
 
-    lw   x7, 24(x14)
-    addi x11, x0, 4
+index_ready:
+    sw   x7, 32(x14)
+
+    lw   x7, 28(x14)
+    addi x11, x0, 5
     beq  x7, x11, count_ready
     addi x7, x7, 1
-    sw   x7, 24(x14)
+    sw   x7, 28(x14)
 
 count_ready:
-    sw   x13, 32(x14)         # Copia local de la decisión pendiente
+    sw   x13, 36(x14)         # Copia local de la decisión pendiente
     sw   x13, 8(x2)           # Escribir DECISION para el siguiente tick
     jal  x0, wait_price

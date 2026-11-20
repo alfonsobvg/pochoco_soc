@@ -2,9 +2,9 @@
 # Referencia en Python para el Pochoco Trader.
 #
 # Uso:
-#   python reference.py          -> corre con umbral 8
-#   python reference.py 5        -> corre con umbral 5
-#   python reference.py barrido  -> compara umbrales de 0 a 20
+#   python reference.py                -> corre con los umbrales por defecto
+#   python reference.py 7 15           -> compra 7, venta 15
+#   python reference.py barrido        -> compara pares de 0 a 20
 
 import csv
 import sys
@@ -14,8 +14,9 @@ from pathlib import Path
 CAJA_INICIAL = 10000
 COMISION = 5
 MAX_ACCIONES = 63
-VENTANA = 4
-UMBRAL = 8
+VENTANA = 5
+UMBRAL_COMPRA = 7
+UMBRAL_VENTA = 15
 
 ARCHIVO_PROYECTO = Path(__file__).resolve().parent.parent
 ARCHIVO_SERIE = ARCHIVO_PROYECTO / "practica_meta.csv"
@@ -78,24 +79,24 @@ def ejecutar_orden(decision, precio, caja, acciones):
     return caja, acciones, cantidad_ejecutada
 
 
-def decidir(precio, precios_anteriores, acciones, umbral):
-    """Compara el precio actual con la media de los cuatro precios previos."""
+def decidir(precio, precios_anteriores, acciones, umbral_compra, umbral_venta):
+    """Compara el precio actual con la media de los cinco precios previos."""
     if len(precios_anteriores) < VENTANA:
         return 0  # Mantener durante el período inicial
 
     suma = sum(precios_anteriores)
 
-    # Multiplicar por 4 evita usar división para calcular el promedio.
-    if precio * VENTANA > suma + umbral * VENTANA and acciones == 0:
+    # Multiplicar por cinco evita dividir para calcular el promedio.
+    if precio * VENTANA > suma + umbral_compra * VENTANA and acciones == 0:
         return (1 << 6) | MAX_ACCIONES  # Comprar hasta 63
 
-    if precio * VENTANA < suma - umbral * VENTANA and acciones > 0:
+    if precio * VENTANA < suma - umbral_venta * VENTANA and acciones > 0:
         return (2 << 6) | MAX_ACCIONES  # Vender hasta 63
 
     return 0
 
 
-def simular(precios, umbral):
+def simular(precios, umbral_compra, umbral_venta, guardar_detalle=True):
     """Simula la estrategia y lleva una copia local de caja y acciones."""
     caja = CAJA_INICIAL
     acciones = 0
@@ -125,22 +126,30 @@ def simular(precios, umbral):
         if perdida > perdida_maxima:
             perdida_maxima = perdida
 
-        decision_nueva = decidir(precio, precios_anteriores, acciones, umbral)
-        filas.append(
-            {
-                "tick": tick,
-                "price": precio,
-                "threshold": umbral,
-                "decision_executed": f"{decision_ejecutada:02X}",
-                "quantity_executed": cantidad,
-                "decision_written": f"{decision_nueva:02X}",
-                "cash": caja,
-                "shares": acciones,
-                "wealth": patrimonio,
-                "peak": patrimonio_maximo,
-                "drawdown": perdida,
-            }
+        decision_nueva = decidir(
+            precio,
+            precios_anteriores,
+            acciones,
+            umbral_compra,
+            umbral_venta,
         )
+        if guardar_detalle:
+            filas.append(
+                {
+                    "tick": tick,
+                    "price": precio,
+                    "buy_threshold": umbral_compra,
+                    "sell_threshold": umbral_venta,
+                    "decision_executed": f"{decision_ejecutada:02X}",
+                    "quantity_executed": cantidad,
+                    "decision_written": f"{decision_nueva:02X}",
+                    "cash": caja,
+                    "shares": acciones,
+                    "wealth": patrimonio,
+                    "peak": patrimonio_maximo,
+                    "drawdown": perdida,
+                }
+            )
 
         precios_anteriores.append(precio)
         if len(precios_anteriores) > VENTANA:
@@ -195,7 +204,8 @@ def guardar_csv(filas):
     columnas = [
         "tick",
         "price",
-        "threshold",
+        "buy_threshold",
+        "sell_threshold",
         "decision_executed",
         "quantity_executed",
         "decision_written",
@@ -229,11 +239,14 @@ def main():
         if len(sys.argv) > 2:
             archivo_csv = Path(sys.argv[2])
     else:
-        umbral = UMBRAL
+        umbral_compra = UMBRAL_COMPRA
+        umbral_venta = UMBRAL_VENTA
         if modo:
-            umbral = int(modo)
+            umbral_compra = int(modo)
         if len(sys.argv) > 2:
-            archivo_csv = Path(sys.argv[2])
+            umbral_venta = int(sys.argv[2])
+        if len(sys.argv) > 3:
+            archivo_csv = Path(sys.argv[3])
 
     precios = leer_precios(archivo_csv)
     comprar_mantener = comprar_y_mantener(precios)
@@ -248,16 +261,38 @@ def main():
     mostrar_resultado("Comprar y mantener", comprar_mantener)
 
     if modo == "barrido":
-        for valor in range(21):
-            _, resultado = simular(precios, valor)
-            mostrar_resultado(f"MA4 umbral {valor}", resultado)
+        resultados = []
+        for compra in range(21):
+            for venta in range(21):
+                _, resultado = simular(precios, compra, venta, False)
+                resultados.append((compra, venta, resultado))
+
+        resultados.sort(
+            key=lambda item: (
+                item[2]["patrimonio"],
+                -item[2]["perdida_maxima"],
+                -item[2]["ordenes"],
+            ),
+            reverse=True,
+        )
+        print("Mejores pares compra/venta:")
+        for compra, venta, resultado in resultados[:10]:
+            nombre = f"Compra {compra}, venta {venta}"
+            mostrar_resultado(nombre, resultado)
+
+        for compra, venta, resultado in resultados:
+            if compra != venta:
+                print("Mejor par con umbrales distintos:")
+                mostrar_resultado(f"Compra {compra}, venta {venta}", resultado)
+                break
         return
 
-    filas, resultado = simular(precios, umbral)
+    filas, resultado = simular(precios, umbral_compra, umbral_venta)
     guardar_csv(filas)
-    print(f"Umbral usado: {umbral}")
+    print(f"Umbral de compra: {umbral_compra}")
+    print(f"Umbral de venta: {umbral_venta}")
     print(f"Decisiones guardadas en: {ARCHIVO_SALIDA}")
-    mostrar_resultado("Promedio móvil 4", resultado)
+    mostrar_resultado(f"Promedio móvil {VENTANA}", resultado)
 
 
 if __name__ == "__main__":
