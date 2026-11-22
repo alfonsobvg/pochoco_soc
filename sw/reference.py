@@ -16,7 +16,7 @@ COMISION = 5
 MAX_ACCIONES = 63
 VENTANA = 5
 UMBRAL_COMPRA = 7
-UMBRAL_VENTA = 15
+UMBRAL_VENTA = 7
 
 ARCHIVO_PROYECTO = Path(__file__).resolve().parent.parent
 ARCHIVO_SERIE = ARCHIVO_PROYECTO / "practica_meta.csv"
