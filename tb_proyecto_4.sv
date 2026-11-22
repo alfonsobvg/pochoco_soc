@@ -10,9 +10,9 @@ module tb_proyecto_4;
 
   // Configuración: pueden cambiar estos valores
   localparam string PROGRAMA   = "sw/trade.hex";
-  localparam string SERIE      = "tb/practica.csv";
+  localparam string SERIE      = "practica_meta.csv";
   localparam int    PERIODO_NS = 100000;   // ronda 1: 10000000, ronda 2: 1000000, ronda 3: 100000
-  localparam int    NTICKS     = 2000;     // la serie completa tiene 20000
+  localparam int    NTICKS     = 20000;    // ejecuta la serie de práctica completa
 
   localparam int CAJA0    = 10000;
   localparam int COMISION = 5;
@@ -84,20 +84,55 @@ module tb_proyecto_4;
     if (peak - w > max_dd) max_dd = peak - w;
   endtask
 
-  // Mide los ciclos entre que llega el precio y el programa escribe DECISION
-  int ciclos = 0, peor_caso = 0, respuestas = 0, precios_perdidos = 0;
+  // Mide trabajo de CPU desde byte_done hasta que se escribe DECISION.
+  // commit cuenta instrucciones válidas que avanzan por la etapa ID.
+  int ciclos = 0, instrucciones_tick = 0;
+  int peor_caso = 0, peor_ic = 0, peor_cpi_milesimas = 0;
+  int tick_peor_ic = 0, tick_peor_ciclos = 0, tick_peor_cpi = 0;
+  int respuestas = 0, precios_perdidos = 0, tick_metrica = 0;
+  int total_ciclos = 0, total_ic = 0, tiempo_tick_ns = 0;
+  int peor_tiempo_ns = 0, fd_metricas;
+  real cpi_tick, suma_cpi = 0.0;
+  real promedio_ic, promedio_ciclos, promedio_cpi;
   bit esperando = 0;
 
   always @(posedge clk) begin
-    ciclos++;
     if (dut.u_spi.byte_done) begin
       if (dut.u_spi.new_price_q) precios_perdidos++;      // el precio anterior no se leyó
       ciclos = 0;
+      instrucciones_tick = 0;
       esperando = 1;
-    end else if (esperando && dut.u_spi.wr && dut.u_spi.off == 2) begin
-      if (ciclos > peor_caso) peor_caso = ciclos;
-      respuestas++;
-      esperando = 0;
+      tick_metrica++;
+    end else if (esperando) begin
+      ciclos++;
+      if (dut.u_core.u_id.commit) instrucciones_tick++;
+
+      if (dut.u_spi.wr && dut.u_spi.off == 2) begin
+        respuestas++;
+        tiempo_tick_ns = ciclos * 40;
+        cpi_tick = instrucciones_tick == 0 ? 0.0 :
+                   $itor(ciclos) / $itor(instrucciones_tick);
+        total_ciclos += ciclos;
+        total_ic += instrucciones_tick;
+        suma_cpi = suma_cpi + cpi_tick;
+        if (ciclos > peor_caso) begin
+          peor_caso = ciclos;
+          tick_peor_ciclos = tick_metrica - 1;
+        end
+        if (instrucciones_tick > peor_ic) begin
+          peor_ic = instrucciones_tick;
+          tick_peor_ic = tick_metrica - 1;
+        end
+        if (tiempo_tick_ns > peor_tiempo_ns) peor_tiempo_ns = tiempo_tick_ns;
+        if (cpi_tick * 1000.0 > peor_cpi_milesimas) begin
+          peor_cpi_milesimas = $rtoi(cpi_tick * 1000.0 + 0.5);
+          tick_peor_cpi = tick_metrica - 1;
+        end
+        $fdisplay(fd_metricas, "%0d,%0d,%0d,%0.3f,%0d",
+                  tick_metrica - 1, instrucciones_tick, ciclos,
+                  cpi_tick, tiempo_tick_ns);
+        esperando = 0;
+      end
     end
   end
 
@@ -118,6 +153,8 @@ module tb_proyecto_4;
     leer_serie();
     fd = $fopen("decisiones.csv", "w");
     $fdisplay(fd, "tick,precio,decision,caja,acciones,patrimonio");
+    fd_metricas = $fopen("sw/resultados_reales/practica_meta_metricas_tick.csv", "w");
+    $fdisplay(fd_metricas, "tick,instrucciones,ciclos,cpi,tiempo_ns");
     #4000;
 
     for (int n = 0; n < NTICKS; n++) begin
@@ -127,6 +164,7 @@ module tb_proyecto_4;
       #(PERIODO_NS - SPI_NS);
     end
     $fclose(fd);
+    $fclose(fd_metricas);
 
     ref_q       = (CAJA0 - COMISION) / precio[0];
     ref_w       = CAJA0 - COMISION - ref_q * precio[0] + ref_q * precio[NTICKS - 1];
@@ -138,7 +176,17 @@ module tb_proyecto_4;
     $display("No operar:                 %0d", CAJA0);
     $display("Comprar y mantener:        %0d", ref_w);
     $display("Peor caso precio->decision: %0d ciclos (disponibles: %0d)", peor_caso, presupuesto);
+    promedio_ic      = $itor(total_ic) / $itor(respuestas);
+    promedio_ciclos  = $itor(total_ciclos) / $itor(respuestas);
+    promedio_cpi     = suma_cpi / $itor(respuestas);
+    $display("Promedio por tick: IC %0.3f, ciclos %0.3f, CPI %0.4f, tiempo %0.2f ns",
+             promedio_ic, promedio_ciclos, promedio_cpi, promedio_ciclos * 40.0);
+    $display("Max IC: %0d en tick %0d; max ciclos/tiempo: %0d / %0d ns en tick %0d",
+             peor_ic, tick_peor_ic, peor_caso, peor_tiempo_ns, tick_peor_ciclos);
+    $display("Max CPI: %0.3f en tick %0d",
+             peor_cpi_milesimas / 1000.0, tick_peor_cpi);
     $display("Detalle por tick en decisiones.csv");
+    $display("Metricas por tick en sw/resultados_reales/practica_meta_metricas_tick.csv");
 
     chequear(bits_x == 0,           "MISO sin valores X");
     chequear(respuestas > 0,        "el programa escribe DECISION");

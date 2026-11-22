@@ -4,13 +4,13 @@
 # SPDX-License-Identifier: SHL-0.51
 
 
-ASM_SRC := sw/game.s
-HEX_OUT := sw/game.hex
+ASM_SRC := sw/trade.s
+HEX_OUT := sw/trade.hex
 
 ASM_MANIFEST := assembler/Cargo.toml
 ASM_FILES := $(wildcard assembler/src/*.rs)
 
-TOP := game_top
+TOP := trade_top
 PCF := goboard.pcf
 
 # RTL Sources (Búsqueda recursiva de archivos .v)
@@ -29,13 +29,13 @@ all: prog
 $(HEX_OUT): $(ASM_SRC) $(ASM_MANIFEST) $(ASM_FILES)
 	cargo run --quiet --release --manifest-path $(ASM_MANIFEST) -- $(ASM_SRC) $(HEX_OUT)
 
-# Paso 1: Síntesis con Yosys (Depende de sw/game.hex)
+# Paso 1: Síntesis con Yosys (Depende de sw/trade.hex)
 $(JSON): $(HEX_OUT) $(SRC)
 	yosys -p "read_verilog $(SRC); synth_ice40 -top $(TOP) -json $(JSON); stat"
 
 # Paso 2: Place and Route con NextPNR
 $(ASC): $(JSON) $(PCF)
-	nextpnr-ice40 --hx1k --package vq100 --json $(JSON) --pcf $(PCF) --asc $(ASC)
+	nextpnr-ice40 --hx1k --package vq100 --freq 25 --json $(JSON) --pcf $(PCF) --asc $(ASC)
 
 # Paso 3: Generación del Bitstream
 $(BIN): $(ASC)

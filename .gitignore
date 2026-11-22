@@ -16,4 +16,9 @@ module_stats/
 # Simulation Artifacts (Iverilog / GTKWave / Cocotb)
 sim/sim
 *.vcd
+*.vvp
 *.csv
+# Datos y métricas entregables del Proyecto 4
+!practica_meta.csv
+!sw/resultados_reales/practica_meta_metricas_tick.csv
+!sw/resultados_reales/practica_meta_resultados_tick.csv
